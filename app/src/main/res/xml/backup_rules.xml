@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 及以下的全量备份规则。
+     排除加密凭证(密钥不可随备份迁移)与数据库(含用户名/服务器地址)。 -->
 <full-backup-content>
-    <!-- 不备份加密的凭证文件,避免迁移后失效 -->
     <exclude domain="sharedpref" path="webdav_credentials.xml" />
+    <exclude domain="database" path="webdav_sync.db" />
+    <exclude domain="database" path="webdav_sync.db-wal" />
+    <exclude domain="database" path="webdav_sync.db-shm" />
 </full-backup-content>

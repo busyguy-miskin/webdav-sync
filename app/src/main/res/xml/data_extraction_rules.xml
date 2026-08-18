@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ 的云备份/设备迁移规则:与 backup_rules.xml 保持一致。
+     排除加密凭证(密钥不可随备份迁移)与数据库(含用户名/服务器地址)。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="webdav_credentials.xml" />
+        <exclude domain="database" path="webdav_sync.db" />
+        <exclude domain="database" path="webdav_sync.db-wal" />
+        <exclude domain="database" path="webdav_sync.db-shm" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="webdav_credentials.xml" />
+        <exclude domain="database" path="webdav_sync.db" />
+        <exclude domain="database" path="webdav_sync.db-wal" />
+        <exclude domain="database" path="webdav_sync.db-shm" />
+    </device-transfer>
+</data-extraction-rules>
