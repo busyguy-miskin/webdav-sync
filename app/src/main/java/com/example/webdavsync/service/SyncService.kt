@@ -87,10 +87,14 @@ class SyncService : Service() {
         if (syncJob?.isActive == true) return // 同一时间只跑一个协程
         val container = (application as WebDavSyncApp).container
         syncJob = scope.launch {
-            while (true) {
-                val taskId = synchronized(pendingLock) { pending.removeFirstOrNull() } ?: break
-                runOne(container, taskId)
-            }
+            do {
+                while (true) {
+                    val taskId = synchronized(pendingLock) { pending.removeFirstOrNull() } ?: break
+                    runOne(container, taskId)
+                }
+            } while (synchronized(pendingLock) { pending.isNotEmpty() })
+            // 收尾前持锁复查一次,消除"队列排空判定与 onStartCommand 入队"之间的竞态,
+            // 避免新任务在 stopSelf 前一刻入队却被永久搁置
             runCatching { logDao.trim(KEEP_LOGS) }
             stopSelf()
         }

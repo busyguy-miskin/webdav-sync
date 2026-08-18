@@ -21,6 +21,10 @@ interface SyncTaskDao {
     @Query("SELECT * FROM sync_tasks WHERE enabled = 1 ORDER BY id ASC")
     suspend fun getEnabled(): List<SyncTask>
 
+    /** 使用指定本地目录的全部任务(删除任务时判断是否可释放 SAF 权限)。 */
+    @Query("SELECT * FROM sync_tasks WHERE localTreeUri = :treeUri")
+    suspend fun getByTreeUri(treeUri: String): List<SyncTask>
+
     @Query("SELECT * FROM sync_tasks WHERE id = :id")
     fun observeById(id: Long): Flow<SyncTask?>
 

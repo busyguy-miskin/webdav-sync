@@ -44,11 +44,15 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         viewModelScope.launch {
             val id = if (taskId > 0) {
+                // 整行 @Update 会覆盖全部列:带出旧的同步时间/结果,避免编辑任务抹掉历史
+                val old = taskDao.getById(taskId)
                 taskDao.update(
                     SyncTask(
                         id = taskId, name = name, serverUrl = serverUrl, username = username,
                         remotePath = remotePath, localTreeUri = localTreeUri, overwrite = overwrite,
-                        enabled = enabled, wifiOnly = wifiOnly, trustAllCerts = trustAllCerts
+                        enabled = enabled, wifiOnly = wifiOnly, trustAllCerts = trustAllCerts,
+                        lastSyncTime = old?.lastSyncTime ?: 0L,
+                        lastSyncResult = old?.lastSyncResult ?: ""
                     )
                 )
                 // 更新密码(若提供非空则覆盖;空字符串视为不修改)
@@ -76,13 +80,16 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * 删除任务,并清理相关数据:加密凭证、文件记录、同步日志,以及释放 SAF 持久化权限。
+     * 多个任务共用同一本地目录时,仅当本任务是最后一个使用者才释放权限。
      */
     fun deleteTask(task: SyncTask) {
         viewModelScope.launch {
             credentialStore.deletePassword(task.id)
             container.fileRecordDao.deleteByTask(task.id)
             container.syncLogDao.deleteByTask(task.id)
-            releaseSafPermission(task.localTreeUri)
+            if (taskDao.getByTreeUri(task.localTreeUri).none { it.id != task.id }) {
+                releaseSafPermission(task.localTreeUri)
+            }
             taskDao.delete(task)
         }
     }
@@ -97,8 +104,8 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 读取已存密码(测试连接时,编辑现有任务且密码留空用)。 */
-    fun getPasswordForTest(taskId: Long): String = credentialStore.getPassword(taskId)
+    /** 读取已存密码(测试连接时,编辑现有任务且密码留空用);从未保存过则返回空串。 */
+    fun getPasswordForTest(taskId: Long): String = credentialStore.getPassword(taskId) ?: ""
 
     /** 持久化 SAF 授权,供保存任务后使用。返回可读的目录名称用于显示。 */
     fun takeSafPermission(uri: Uri): String {
@@ -144,7 +151,7 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
     ): Result<List<RemoteResource>> = withContext(Dispatchers.IO) {
         try {
             val pwd = password.ifEmpty {
-                if (taskId > 0) credentialStore.getPassword(taskId) else ""
+                if (taskId > 0) credentialStore.getPassword(taskId) ?: "" else ""
             }
             val entries = WebDavClient(serverUrl, username, pwd, trustAllCerts).listDirectory(remotePath)
             Result.success(entries)
