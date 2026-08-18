@@ -98,10 +98,13 @@ object PropfindParser {
         return results
     }
 
-    /** URL 解码(href 通常经过编码,如 %20)。 */
+    /**
+     * URL 解码(仅 %XX)。href 属于 URI path 而非表单编码:
+     * 文件名里的 '+' 是字面加号,不能被解码成空格,故先转义回 %2B 再解码。
+     */
     private fun decode(s: String): String =
         try {
-            java.net.URLDecoder.decode(s, "UTF-8")
+            java.net.URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
         } catch (e: Exception) {
             s
         }

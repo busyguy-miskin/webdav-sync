@@ -155,4 +155,89 @@ class PropfindParserTest {
         assertEquals("readme.txt", readme.name)
         assertEquals("photos", photos.name)
     }
+
+    // href 属于 URI path 而非表单编码:文件名中的 '+' 是字面加号,不是空格。
+    // 回归背景:曾用 URLDecoder 直接解码,导致 "a+b.txt" 被错误写成 "a b.txt"。
+    private val plusSample = """<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/dav/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/a+b.txt</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype/>
+      <D:getcontentlength>10</D:getcontentlength>
+      <D:getetag>"p1"</D:getetag></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/%E7%85%A7%E7%89%87+1.jpg</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype/>
+      <D:getcontentlength>20</D:getcontentlength>
+      <D:getetag>"p2"</D:getetag></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+    @Test
+    fun plus_in_filename_stays_literal() {
+        val parser = KXmlParser().apply { setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true) }
+        parser.setInput(plusSample.reader())
+        val result = PropfindParser.parseWith(parser, "/dav")
+
+        val plus = result.find { it.relativePath == "a+b.txt" }
+        assertTrue("a+b.txt 的加号必须保留,不应变成空格", plus != null)
+        val chinese = result.find { it.relativePath == "照片+1.jpg" }
+        assertTrue("中文+加号混合文件名应正确解码且保留加号", chinese != null)
+    }
+
+    // 异常/恶意服务器的 href:含 .. 段与 %2F。
+    // 解析器原样输出,由 SafStorageHelper.safeParts 在写入本地前拒绝 ../ 段(纵深防御);
+    // %2F 解码为 / 后按段处理,不会逃出 SAF 根目录。
+    private val traversalSample = """<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/dav/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/../secret.txt</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype/>
+      <D:getcontentlength>1</D:getcontentlength></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/sub%2Ffile.txt</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype/>
+      <D:getcontentlength>2</D:getcontentlength></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+    @Test
+    fun traversal_href_parsed_verbatim_for_downstream_validation() {
+        val parser = KXmlParser().apply { setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true) }
+        parser.setInput(traversalSample.reader())
+        val result = PropfindParser.parseWith(parser, "/dav")
+
+        // 解析层原样透传,写入前由 safeParts 拒绝(见 SafStorageHelper)
+        assertTrue(result.any { it.relativePath == "../secret.txt" })
+        // %2F 解码为斜杠,成为多段路径(仍被限制在 SAF 根目录内)
+        assertTrue(result.any { it.relativePath == "sub/file.txt" })
+    }
 }

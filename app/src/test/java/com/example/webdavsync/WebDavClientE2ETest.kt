@@ -33,7 +33,8 @@ class WebDavClientE2ETest {
 
     private fun cfg(key: String): String {
         val file = Paths.get("e2e.properties").takeIf { it.exists() }?.let { p ->
-            Properties().apply { p.toFile().inputStream().use { load(it) } }
+            // 必须用 UTF-8 Reader:Properties.load(InputStream) 按 ISO-8859-1 解码,会把中文目录读成乱码
+            Properties().apply { p.toFile().reader(Charsets.UTF_8).use { load(it) } }
         }
         return System.getenv(key) ?: System.getProperty(key) ?: file?.getProperty(key) ?: ""
     }

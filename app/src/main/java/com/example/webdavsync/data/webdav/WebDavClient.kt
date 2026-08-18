@@ -1,6 +1,7 @@
 package com.example.webdavsync.data.webdav
 
 import okhttp3.Credentials
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -14,21 +15,40 @@ import java.util.concurrent.TimeUnit
  * 仅依赖标准 WebDAV(RFC 4918),不引入第三方库。
  *
  * 一个 [WebDavClient] 实例对应一组凭证。线程安全(OkHttp 本身线程安全)。
+ *
+ * 429/5xx 自动指数退避重试(尊重 Retry-After 头);GET/PROPFIND 均幂等,可安全重放。
  */
 class WebDavClient(
     private val serverUrl: String,
     username: String,
     password: String,
     /** 是否信任所有证书(用于内网自签名 HTTPS)。默认关闭以保证安全。 */
-    trustAllCerts: Boolean = false
+    trustAllCerts: Boolean = false,
+    /** 429/5xx 的最大重试次数(额外尝试次数,不含首次)。 */
+    retryMaxAttempts: Int = 3,
+    /** 退避基数(毫秒),实际延迟为 base << attempt,上限 30s。 */
+    retryBaseDelayMs: Long = 1_000L
 ) {
     private val auth = if (username.isNotEmpty() || password.isNotEmpty())
         Credentials.basic(username, password) else null
 
-    private val client: OkHttpClient = buildClient(trustAllCerts)
+    private val client: OkHttpClient =
+        buildClient(trustAllCerts, retryMaxAttempts, retryBaseDelayMs)
 
     /** 拉取某远程目录下全部资源(含子目录文件),返回相对 [remotePath] 的文件清单(不含目录本身)。 */
-    fun listFiles(remotePath: String): List<RemoteResource> {
+    fun listFiles(remotePath: String): List<RemoteResource> = try {
+        listFilesDepthInfinity(remotePath)
+    } catch (e: WebDavException.HttpError) {
+        // 部分服务器(IIS、Nextcloud 等)禁用 Depth:infinity 并返回 501,回退为逐层 Depth:1 遍历
+        if (e.code == 501) listFilesRecursive(remotePath) else throw e
+    } catch (e: WebDavException.AuthFailed) {
+        // 403 也常被用于拒绝 Depth:infinity(exec 中映射为 AuthFailed):
+        // 回退 Depth:1 尝试;若确属认证/权限问题,首个 Depth:1 请求会以同样错误失败抛出
+        listFilesRecursive(remotePath)
+    }
+
+    /** Depth:infinity 一次拉全(默认路径)。 */
+    private fun listFilesDepthInfinity(remotePath: String): List<RemoteResource> {
         val url = joinUrl(serverUrl, remotePath)
         val body = PROPFIND_BODY.toRequestBody(MEDIA_XML)
         val request = Request.Builder()
@@ -54,6 +74,32 @@ class WebDavClient(
         }
     }
 
+    /** Depth:infinity 被服务器拒绝时的回退:迭代式逐层遍历,结果与一次拉全等价。 */
+    private fun listFilesRecursive(rootPath: String): List<RemoteResource> {
+        val files = mutableListOf<RemoteResource>()
+        val stack = ArrayDeque<String>()
+        stack.addLast(rootPath)
+        while (stack.isNotEmpty()) {
+            val dir = stack.removeLast()
+            for (entry in listDirectory(dir)) {
+                // entry.relativePath 相对"当前遍历的目录",需与 dir 拼接保持完整层级
+                val childPath = joinRemotePath(dir, entry.relativePath)
+                if (entry.isDirectory) {
+                    stack.addLast(childPath)
+                } else {
+                    files += RemoteResource(
+                        relativePath = childPath,
+                        isDirectory = false,
+                        size = entry.size,
+                        etag = entry.etag,
+                        lastModified = entry.lastModified
+                    )
+                }
+            }
+        }
+        return files
+    }
+
     /**
      * 下载远程文件,把响应体交给 [consumer] 处理(通常流式写入 SAF OutputStream)。
      * 支持断点续传:[fromByte] > 0 时发送 Range 头。
@@ -76,6 +122,13 @@ class WebDavClient(
 
         val response = exec(request)
         response.use {
+            // 服务器可能忽略 Range 返回 200 + 完整 body:若调用方按追加语义写入会拼出损坏数据
+            if (fromByte > 0L && it.code != 206) {
+                throw WebDavException.Network(
+                    "服务器不支持断点续传(返回 HTTP ${it.code} 而非 206),需从头下载",
+                    IllegalStateException("Range 被服务器忽略: code=${it.code}")
+                )
+            }
             val body = it.body ?: throw WebDavException.Network("响应体为空", IllegalStateException())
             val total = body.contentLength()
             consumer(body.byteStream(), if (total > 0) total else -1L)
@@ -150,12 +203,17 @@ class WebDavClient(
         return response
     }
 
-    private fun buildClient(trustAll: Boolean): OkHttpClient {
+    private fun buildClient(
+        trustAll: Boolean,
+        retryMaxAttempts: Int,
+        retryBaseDelayMs: Long
+    ): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            .addInterceptor(RetryBackoffInterceptor(retryMaxAttempts, retryBaseDelayMs))
         if (trustAll) {
             installTrustAll(builder)
         }
@@ -200,5 +258,40 @@ class WebDavClient(
             val p = if (path.isEmpty() || path == "/") "" else "/" + path.trimStart('/')
             return "$b$p"
         }
+
+        /** 拼接根目录与子路径为相对根目录的完整子路径(不以 / 开头)。 */
+        private fun joinRemotePath(root: String, child: String): String {
+            val r = root.trim('/')
+            return if (r.isEmpty()) child else "$r/$child"
+        }
+    }
+}
+
+/**
+ * 对 429/5xx 做指数退避重试(尊重 Retry-After 头)。
+ * 应用拦截器层实现,chain.proceed 可安全多次调用;重试前必须关闭上一个响应。
+ */
+private class RetryBackoffInterceptor(
+    private val maxRetries: Int,
+    private val baseDelayMs: Long
+) : Interceptor {
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        var attempt = 0
+        while (true) {
+            val response = chain.proceed(chain.request())
+            val retriable = response.code == 429 || response.code in 500..599
+            if (!retriable || attempt >= maxRetries) return response
+            val retryAfterMs = response.header("Retry-After")?.trim()?.toLongOrNull()?.times(1000L)
+            response.close()
+            val delay = (retryAfterMs ?: (baseDelayMs shl attempt))
+                .coerceIn(0L, MAX_DELAY_MS)
+            Thread.sleep(delay)
+            attempt++
+        }
+    }
+
+    companion object {
+        private const val MAX_DELAY_MS = 30_000L
     }
 }
