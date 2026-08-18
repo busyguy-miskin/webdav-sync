@@ -267,10 +267,11 @@ flowchart TD
 
     Compare --> Decide{"每个文件决策"}
     Decide -- "无记录且本地无文件" --> DL["DOWNLOAD"]
-    Decide -- "etag/size一致" --> SK["SKIP"]
+    Decide -- "etag/size一致且本地存在" --> SK["SKIP"]
     Decide -- "有变化+overwrite=true" --> UP["UPDATE"]
     Decide -- "有变化+overwrite=false" --> RC["REMOTE_CHANGED"]
     Decide -- "本地有文件无记录" --> SK
+    Decide -- "记录未变但本地缺失" --> DL
 
     DL --> ToDl["加入下载集合"]
     UP --> ToDl
@@ -504,29 +505,27 @@ classDiagram
 
 ### 6.2 目录/文件创建逻辑
 
-`openOutputStream` 处理 `relativePath`（如 `sub/a.txt`）：
+`writeAtomically`（下载写入的推荐路径）处理 `relativePath`（如 `sub/a.txt`）：
 
 ```mermaid
 flowchart TD
-    In(["openOutputStream relPath"]) --> Split["按斜杠拆分 parts"]
-    Split --> Root["rootDir treeUri 校验权限"]
-    Root --> Loop{"遍历 parts 0 到 n-2"}
-    Loop -- "每段" --> Find{"findFile 存在?"}
-    Find -- 是 --> Enter["进入该目录"]
-    Find -- 否 --> Create["createDirectory"]
-    Create --> Chk{"创建成功?"}
-    Chk -- 否 --> ErrNet["抛 Network 异常"]
-    Chk -- 是 --> Enter
-    Enter --> Loop
-    Loop -- "遍历完目录" --> File{"findFile 最后一段 存在?"}
-    File -- 不存在 --> NewFile["createFile octet-stream"]
-    File -- 存在 --> Open["openOutputStream wt 或 wa"]
-    NewFile --> Open
-    Open --> Out(["返回 OutputStream"])
-    ErrNet --> Out2(["抛异常"])
+    In(["writeAtomically relPath"]) --> Safe["safeParts 校验<br/>拒 ../、控制字符、保留名"]
+    Safe --> Root["rootDir treeUri 校验权限"]
+    Root --> Loop{"逐级 findFile/createDirectory<br/>走到父目录"}
+    Loop -- "目录就绪" --> Temp["复用/创建临时文件<br/>name.webdavsync-part"]
+    Temp --> Write["openOutputStream wt<br/>写入全部字节后 use 关闭"]
+    Write --> Bak{"目标文件已存在?"}
+    Bak -- 是 --> Rename["旧文件改名 .webdavsync-old"]
+    Bak -- 否 --> Swap
+    Rename --> Swap{"临时文件 renameTo 正名"}
+    Swap -- "成功" --> Del["删除备份"] --> Out(["完成"])
+    Swap -- "失败" --> Restore["备份改回正名(恢复旧版本)"] --> Err(["抛异常"])
+    Write -- "写中途失败" --> Clean["删除残缺临时文件<br/>原文件未受影响"] --> Err
 ```
 
-> 注意：SAF 不支持真正的 append，当前 `append` 参数实际为覆盖写（`wt`），断点续传由调用方 seek 处理（`SyncEngine` 当前固定 `fromByte=0L`）。
+> 原子性说明：SAF 无跨文件原子 rename,这里以「临时文件 → 备份改名 → 正名替换」尽力逼近——
+> 写入阶段失败原文件零影响;替换阶段失败自动恢复备份。`openOutputStream`（直接覆盖写,`wt`/`wa`）
+> 仍保留供非下载场景使用。断点续传未启用（`SyncEngine` 固定 `fromByte=0L`）。
 
 ---
 
@@ -607,13 +606,15 @@ flowchart TD
 
 | 方面 | 措施 | 状态 |
 |------|------|------|
-| 密码存储 | EncryptedSharedPreferences（AES-GCM 256 + AES-SIV-CMAC256） | ✅ |
-| 用户名/配置 | Room 明文（非敏感） | ✅ |
+| 密码存储 | EncryptedSharedPreferences（AES-GCM 256 + AES-SIV-CMAC256），解密失败自愈重建（换机恢复场景） | ✅ |
+| 用户名/配置 | Room 明文（非敏感），不参与云备份/设备迁移 | ✅ |
 | 凭证清理 | 任务删除时 `credentialStore.deletePassword` | ✅ |
-| TLS | 默认系统证书校验 | ✅ |
+| TLS | 默认系统证书校验；信任锚仅系统 CA（不含 user CA） | ✅ |
 | 自签名支持 | 任务级 `trustAllCerts` 开关（含 UI 风险提示） | ✅ |
-| 明文 HTTP | `network_security_config.xml` 允许 cleartextTraffic（适配内网） | ✅ |
-| SAF 权限 | `takePersistableUriPermission`，删除任务时释放 | ✅ |
+| 明文 HTTP | `network_security_config.xml` 允许 cleartextTraffic（适配内网），编辑页 `http://` 显示警示 | ✅ |
+| 备份排除 | `backup_rules.xml`（API≤30）+ `data_extraction_rules.xml`（API 31+）排除凭证与数据库 | ✅ |
+| 路径注入防护 | 远程相对路径经 `safeParts` 校验（拒 `..`/控制字符/保留名）后才写入 SAF | ✅ |
+| SAF 权限 | `takePersistableUriPermission`，删除任务且无其他任务共用目录时释放 | ✅ |
 | 网络 | 仅访问用户配置的 WebDAV 服务器，无其他上报 | ✅ |
 
 > ⚠️ `trustAllCerts` 会降低安全性（信任任意证书 + 跳过主机名校验），UI 已明确提示"请勿用于公网未知服务器"。

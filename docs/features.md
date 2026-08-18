@@ -366,6 +366,8 @@ else:
 | 创建文件失败 | `createFile` 返回 null → 抛 Network 异常 | ✅ |
 | 打开输出流失败 | `openOutputStream` 返回 null → 抛 Network 异常 | ✅ |
 | 相对路径含多层目录 | 逐级 `findFile`/`createDirectory` | ✅ |
+| 相对路径含 `..`/控制字符/保留名 | `safeParts` 校验拒绝，抛 Parse 异常 | ✅ |
+| 下载写入（`writeAtomically`） | 临时文件写完 → 旧文件改名备份 → 临时文件改回正名 → 删备份；中途失败删临时文件，原文件完好 | ✅ |
 | append 模式 | SAF 不支持真 append，实际覆盖写（`wt`） | ✅（限制已知） |
 
 ### 4.5 任务编辑边界条件
@@ -385,6 +387,7 @@ else:
 |----------|------|------|
 | 队列为空（无 taskId） | `stopSelf` + `START_NOT_STICKY` | ✅ |
 | 同一时间多个 drainQueue 触发 | `syncJob?.isActive` 守卫，只跑一个协程 | ✅ |
+| 队列排空与入队竞态 | 收尾前持锁复查 `pending`，避免 stopSelf 前一刻入队的任务被搁置 | ✅ |
 | 单任务失败 | 不影响后续任务，继续 drainQueue | ✅ |
 | 取消时正在运行 | `syncJob.cancel()`，当前日志标记 CANCELLED | ✅ |
 | Android 13 无通知权限 | 通知不显示，但同步仍在前台运行 | ✅ |
@@ -488,7 +491,7 @@ stateDiagram-v2
 | 字段 | 控件 | 校验 | 状态 |
 |------|------|------|------|
 | 任务名称 | OutlinedTextField | 非空才允许保存 | ✅ |
-| 服务器地址 | OutlinedTextField | 非空，默认 `https://` | ✅ |
+| 服务器地址 | OutlinedTextField | 非空，默认 `https://`；`http://` 开头显示明文传输警示 | ✅ |
 | 用户名 | OutlinedTextField | — | ✅ |
 | 密码 | PasswordVisualTransformation | 编辑时留空=不修改 | ✅ |
 | 远程目录路径 | OutlinedTextField + 「浏览」按钮 | — | ✅ |
@@ -568,6 +571,8 @@ stateDiagram-v2
 | 读超时 | 60 秒 | ✅ |
 | 写超时 | 60 秒 | ✅ |
 | 失败重连 | `retryOnConnectionFailure(true)` | ✅ |
+| 429/5xx 重试 | `RetryBackoffInterceptor`：指数退避（基数 1s，上限 30s），尊重 `Retry-After`，最多 3 次额外尝试 | ✅ |
+| Range 续传防护 | `fromByte>0` 时非 206 响应直接抛异常，防止服务器忽略 Range 造成拼接损坏 | ✅ |
 
 ### 9.2 日志保留
 
@@ -591,8 +596,9 @@ stateDiagram-v2
 |------|-----|------|
 | 文件名 | `webdav_sync.db` | ✅ |
 | 版本 | 2 | ✅ |
-| 凭证文件 | `webdav_credentials`（EncryptedSharedPreferences） | ✅ |
-| schema 导出 | false | ✅（`[待确认]` 是否开启） |
+| 凭证文件 | `webdav_credentials`（EncryptedSharedPreferences，解密失败自愈重建） | ✅ |
+| schema 导出 | true（`app/schemas/`，供迁移对比留底） | ✅ |
+| 备份规则 | `backup_rules.xml`（API≤30）+ `data_extraction_rules.xml`（API 31+）排除凭证与数据库 | ✅ |
 
 ---
 
@@ -624,7 +630,7 @@ stateDiagram-v2
 |------|------|------------|
 | F-1 | 断点续传实际生效 | `WebDavClient.download(fromByte)` 已支持 Range 头，但 `SyncEngine.downloadOne` 固定 `fromByte=0L`，且 SAF append 受限 |
 | F-2 | 定时同步 | 需 WorkManager / AlarmManager；当前纯手动 |
-| F-3 | 开机自启同步 | `RECEIVE_BOOT_COMPLETED` 权限已声明，无 BroadcastReceiver |
+| F-3 | 开机自启同步 | 需 `RECEIVE_BOOT_COMPLETED` 权限与 BroadcastReceiver，均未声明/实现 |
 | F-4 | 上传 / 双向同步 | 当前仅单向下载，架构未设计上传路径 |
 | F-5 | 远程删除本地（镜像同步） | 与"只增不删"定位冲突，需额外模式开关 |
 | F-6 | 国际化（i18n） | UI 文案硬编码中文 |
@@ -633,9 +639,9 @@ stateDiagram-v2
 | F-9 | 文件过滤规则（黑白名单/扩展名/大小） | 当前同步全部文件 |
 | F-10 | 并发下载 | 当前顺序下载，单协程 |
 | F-11 | 同步进度持久化（重启后恢复） | 进度为内存 StateFlow，进程被杀则丢失 |
-| F-12 | 失败文件自动重试 | 当前失败下次手动同步时续传 |
+| F-12 | 失败文件跨次自动重试 | 单次请求内 429/5xx 已自动退避重试；文件级失败仍待下次手动同步 |
 | F-13 | 电池优化白名单引导 | 未实现 |
-| F-14 | 数据导出/备份 | 未实现 |
+| F-14 | 数据导出/备份 | App 数据不参与云备份（凭证与数据库已排除），导出功能未实现 |
 | F-15 | 完整无障碍支持 | `[待确认]` |
 
 ---

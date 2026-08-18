@@ -55,6 +55,22 @@ cp app/e2e.properties.example app/e2e.properties
 - [系统设计](docs/design.md)
 - [功能规格](docs/features.md)
 
+## 安全说明
+
+- 密码使用 EncryptedSharedPreferences（AES-GCM 256）加密存储，不参与云备份/设备迁移
+- 默认校验 TLS 证书；任务级「信任所有证书」仅建议用于内网自签名服务器
+- 允许明文 HTTP（内网 WebDAV 常态），编辑页会给出警示；公网服务器请使用 HTTPS
+- 备份规则已排除加密凭证与数据库（含用户名/服务器地址）
+
+## 已知限制
+
+- 凭证加密依赖 `androidx.security:security-crypto`（1.1.0-alpha06，无已知 CVE；该库处于 alpha 维护状态，后续可能迁移）
+- 下载写入采用「临时文件 + 原子替换」策略，同步中断不会留下残缺文件
+
+## 许可证
+
+[MIT](LICENSE)
+
 ## 目录结构
 
 ```

@@ -16,7 +16,7 @@ import com.example.webdavsync.data.local.entity.SyncTask
 @Database(
     entities = [SyncTask::class, FileRecord::class, SyncLog::class],
     version = 2,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun syncTaskDao(): SyncTaskDao

@@ -36,6 +36,11 @@ android {
 
     buildFeatures { compose = true }
 
+    // Room schema 导出(为迁移测试与版本对比留底,生成于 app/schemas/)
+    ksp {
+        arg("room.schemaLocation", "$projectDir/schemas")
+    }
+
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     }

@@ -38,7 +38,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.webdavsync.data.local.entity.SyncTask
-import com.example.webdavsync.service.SyncService
 import com.example.webdavsync.ui.theme.EInkCard
 import java.text.SimpleDateFormat
 import java.util.Date
