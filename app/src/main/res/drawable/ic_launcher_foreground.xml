@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 云下载图标(墨水屏:黑底白图标的反色,白底黑图) -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M44,68 L52,76 L68,60 M54,42
+            C42,42 38,50 38,56
+            C32,56 30,62 30,66
+            C30,72 34,76 40,76 L52,76" />
+</vector>

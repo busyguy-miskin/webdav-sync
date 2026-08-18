@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- 不备份加密的凭证文件,避免迁移后失效 -->
+    <exclude domain="sharedpref" path="webdav_credentials.xml" />
+</full-backup-content>

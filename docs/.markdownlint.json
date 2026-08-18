@@ -1,0 +1,5 @@
+{
+  "comment": "文档 markdownlint 配置。MD013(行宽80)对中文文档不适用(中文字符密度高、表格/URL 自然超长),按业界惯例禁用。",
+  "default": true,
+  "MD013": false
+}

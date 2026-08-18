@@ -1,0 +1,9 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 基于 Material3 主题;Compose 内部使用 MaterialTheme,此处仅 Activity 启动背景 -->
+    <!-- 墨水屏:纸白背景 + 深色状态栏图标,避免启动瞬间出现灰底 -->
+    <style name="Theme.WebDavSync" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+    </style>
+</resources>

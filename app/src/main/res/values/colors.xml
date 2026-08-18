@@ -1,0 +1,4 @@
+<resources>
+    <!-- 墨水屏:启动图标背景用近白色,前景使用黑色矢量 -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>

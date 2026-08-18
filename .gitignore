@@ -1,0 +1,34 @@
+# ===== 构建产物 =====
+.gradle/
+build/
+app/build/
+.kotlin/
+
+# ===== 本地配置（含机器相关路径与私密信息，勿提交）=====
+local.properties
+# E2E 联调用的真实服务器地址/账号/密码（模板见 e2e.properties.example）
+app/e2e.properties
+
+# ===== 签名与打包产物（敏感，勿提交）=====
+*.jks
+*.keystore
+!debug.keystore
+*.apk
+*.ap_
+*.aab
+*.hprof
+
+# ===== IDE / 编辑器 =====
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# ===== 本地开发辅助 =====
+.zcode/
+captures/
+*.log
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
