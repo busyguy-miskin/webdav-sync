@@ -140,6 +140,13 @@ fun TaskEditScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            if (serverUrl.startsWith("http://", ignoreCase = true)) {
+                Text(
+                    "⚠ 明文 HTTP:密码与文件内容不加密传输,请仅在可信内网使用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)

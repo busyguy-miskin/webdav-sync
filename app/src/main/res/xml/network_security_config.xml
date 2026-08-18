@@ -2,11 +2,12 @@
 <network-security-config>
     <!-- 允许明文 HTTP 流量。
          WebDAV 同步工具常用于内网/自建服务器(如 AList、Apache WebDAV),
-         很多场景只有 HTTP 而非 HTTPS。明文默认放行,HTTPS 仍正常支持。 -->
+         很多场景只有 HTTP 而非 HTTPS。明文默认放行,HTTPS 仍正常支持。
+         只信任系统 CA:自签名场景请使用任务里的「信任所有证书」开关,
+         不要引导用户安装全局(user)CA,避免放大中间人风险。 -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>
