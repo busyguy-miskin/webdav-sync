@@ -9,12 +9,11 @@ import com.example.webdavsync.data.storage.SafStorageHelper
 import com.example.webdavsync.data.webdav.RemoteResource
 import com.example.webdavsync.data.webdav.WebDavClient
 import com.example.webdavsync.data.webdav.WebDavException
-import com.example.webdavsync.domain.model.FileResult
 import com.example.webdavsync.domain.model.SyncProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import java.io.InputStream
+import kotlinx.coroutines.isActive
 import java.io.OutputStream
 
 /** 单个文件的同步动作。 */
@@ -31,11 +30,12 @@ private data class Plan(val rel: String, val remote: RemoteResource, val action:
  *  2. PROPFIND 拉取远程文件清单
  *  3. 与 Room 中已有 [FileRecord] 比对,决定每个文件的动作:
  *     - 无记录且本地文件不存在 → 下载(新增)
- *     - 有记录且 etag/size 一致 → 跳过(增量)
+ *     - 有记录且 etag/size 一致、本地文件仍存在 → 跳过(增量)
  *     - 有记录且变化 + overwrite=true → 重新下载(更新)
  *     - 有记录且变化 + overwrite=false → 跳过并标记 REMOTE_CHANGED
  *     - 本地已有文件但无记录 → 跳过(尊重本地文件,不覆盖)
- *  4. 流式下载(GET → SAF OutputStream)
+ *     - 记录未变但本地文件缺失(换过本地目录/文件被删) → 重新下载(自愈)
+ *  4. 流式下载(GET → 临时文件,写完原子替换,失败不留残缺文件)
  *  5. 全程不删除任何本地文件
  */
 class SyncEngine(
@@ -52,7 +52,7 @@ class SyncEngine(
         task: SyncTask,
         onProgress: (SyncProgress) -> Unit
     ): SyncProgress {
-        val password = credentialStore.getPassword(task.id)
+        val password = credentialStore.getPassword(task.id) ?: ""
         var progress = SyncProgress(phase = SyncProgress.Phase.LISTING, taskName = task.name)
         onProgress(progress)
 
@@ -129,14 +129,14 @@ class SyncEngine(
             val rec = existing[rf.relativePath]
             val localExists = saf.fileExists(task.localTreeUri, rf.relativePath)
             val action = when {
+                // 有记录未变,且本地文件确实存在 → 跳过(增量)
+                rec != null && isUnchanged(rec, rf) && localExists -> Action.SKIP
                 // 本地已有文件但没有记录(可能是用户手动放进来的) → 不覆盖
                 localExists && rec == null -> Action.SKIP
-                // 有记录且 etag(优先)或 size 一致 → 未变,跳过
-                rec != null && isUnchanged(rec, rf) -> Action.SKIP
                 // 文件有变化(或新增)
                 rec != null && !isUnchanged(rec, rf) ->
                     if (task.overwrite) Action.UPDATE else Action.REMOTE_CHANGED
-                // 新文件
+                // 其余:新文件,或记录未变但本地缺失(换过目录/文件被删) → 下载,自动修复
                 else -> Action.DOWNLOAD
             }
             plans += Plan(rf.relativePath, rf, action)
@@ -212,24 +212,43 @@ class SyncEngine(
 
     /** 判断文件是否未变:ETag 优先,无 ETag 时用 size + lastModified 兜底。 */
     private fun isUnchanged(rec: FileRecord, remote: RemoteResource): Boolean {
-        return if (rec.etag.isNotEmpty() && remote.etag.isNotEmpty()) {
-            rec.etag == remote.etag
-        } else {
-            rec.size == remote.size &&
-                    (rec.lastModified.isEmpty() || rec.lastModified == remote.lastModified)
+        if (rec.etag.isNotEmpty() && remote.etag.isNotEmpty()) {
+            return rec.etag == remote.etag
         }
+        if (rec.size != remote.size) return false
+        if (rec.lastModified.isEmpty() || remote.lastModified.isEmpty()) return true
+        // 日期优先解析为同一时间基(秒)再比较,避免服务器日期格式/时区写法漂移造成假阳性
+        val local = parseHttpDate(rec.lastModified)
+        val remoteDate = parseHttpDate(remote.lastModified)
+        return if (local != null && remoteDate != null) local == remoteDate
+        else rec.lastModified == remote.lastModified
     }
 
-    /** 流式下载单个文件到 SAF。 */
-    private fun downloadOne(client: WebDavClient, task: SyncTask, relativePath: String) {
+    /** RFC1123 HTTP 日期 → epoch 秒;不识别的格式返回 null,由调用方回退字符串比较。 */
+    private fun parseHttpDate(s: String): Long? = try {
+        java.time.OffsetDateTime
+            .parse(s, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+            .toEpochSecond()
+    } catch (e: java.time.format.DateTimeParseException) {
+        null
+    }
+
+    /** 流式下载单个文件到 SAF:先写临时文件,成功后原子替换,失败不留残缺文件。 */
+    private suspend fun downloadOne(client: WebDavClient, task: SyncTask, relativePath: String) {
         val remotePath = if (task.remotePath.isEmpty() || task.remotePath == "/") {
             relativePath
         } else {
             "${task.remotePath.trimEnd('/')}/$relativePath"
         }
-        val out: OutputStream = saf.openOutputStream(task.localTreeUri, relativePath, append = false)
-        client.download(remotePath, fromByte = 0L) { input: InputStream, _ ->
-            out.use { output -> input.copyTo(output) }
+        val coroutineContext = currentCoroutineContext()
+        val ensureActive = {
+            if (!coroutineContext.isActive) throw CancellationException("同步已取消")
+        }
+        saf.writeAtomically(task.localTreeUri, relativePath) { output ->
+            val guarded = CancellingOutputStream(output, ensureActive)
+            client.download(remotePath, fromByte = 0L) { input, _ ->
+                input.copyTo(guarded)
+            }
         }
     }
 
@@ -247,6 +266,23 @@ class SyncEngine(
             )
         )
     }
+}
 
-    @Suppress("unused") private fun unused(): FileResult = FileResult.DOWNLOADED
+/** 每次写缓冲前检查协程是否仍活跃,让"取消"能及时中断大文件的下载写入。 */
+private class CancellingOutputStream(
+    private val delegate: OutputStream,
+    private val ensureActive: () -> Unit
+) : OutputStream() {
+    override fun write(b: Int) {
+        ensureActive()
+        delegate.write(b)
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        ensureActive()
+        delegate.write(b, off, len)
+    }
+
+    override fun flush() = delegate.flush()
+    override fun close() = delegate.close()
 }
